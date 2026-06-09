@@ -3,6 +3,7 @@
 use Block;
 use Cms\Classes\Controller;
 use Event;
+use Illuminate\Support\HtmlString;
 use System\Classes\Asset\Vite;
 use Twig\Extension\AbstractExtension as TwigExtension;
 use Twig\TwigFilter as TwigSimpleFilter;
@@ -67,8 +68,12 @@ class Extension extends TwigExtension
         ];
 
         return [
-            new TwigSimpleFilter('page', [$this, 'pageFilter'], $options),
-            new TwigSimpleFilter('theme', [$this, 'themeFilter'], $options),
+            // Keep Winter's original filters available explicitly while the
+            // my_wintercms runtime still layers Hippo.Core multisite rewrites on top.
+            new TwigSimpleFilter('wn_page', [$this, 'pageFilter'], $options),
+            new TwigSimpleFilter('page', [$this, 'multiSitePageFilter'], $options),
+            new TwigSimpleFilter('wn_theme', [$this, 'themeFilter'], $options),
+            new TwigSimpleFilter('theme', [$this, 'multiSiteThemeFilter'], $options),
         ];
     }
 
@@ -128,7 +133,7 @@ class Extension extends TwigExtension
     /**
      * Renders registered assets of a given type or all types if $type not provided
      */
-    public function assetsFunction(?string $type = null): ?string
+    public function assetsFunction(string $type = null): ?string
     {
         return $this->controller->makeAssets($type);
     }
@@ -136,7 +141,7 @@ class Extension extends TwigExtension
     /**
      * Renders placeholder content, without removing the block, must be called before the placeholder tag itself
      */
-    public function placeholderFunction(string $name, ?string $default = null): ?string
+    public function placeholderFunction(string $name, string $default = null): ?string
     {
         if (($result = Block::get($name)) === null) {
             return null;
@@ -172,15 +177,22 @@ class Extension extends TwigExtension
     /**
      * Generates Vite tags via Laravel's Vite Object.
      */
-    public function viteFunction(array $entrypoints, string $package, ?string $buildDirectory = null): \Illuminate\Support\HtmlString
+    public function viteFunction(array $entrypoints, string $package, ?string $buildDirectory = null): ?HtmlString
     {
-        return Vite::tags($entrypoints, $package, $buildDirectory);
+        $html = Vite::tags($entrypoints, $package, $buildDirectory);
+        if ($html === null) {
+            return null;
+        }
+
+        return new HtmlString(
+            $this->rewriteRenderedAssetUrls((string) $html)
+        );
     }
 
     /**
      * Generates Vite React Refresh tags via Laravel's Vite Object.
      */
-    public function viteReactRefreshFunction(string $package, ?string $buildDirectory = null): ?\Illuminate\Support\HtmlString
+    public function viteReactRefreshFunction(string $package, ?string $buildDirectory = null): ?HtmlString
     {
         return Vite::reactRefreshTag($package, $buildDirectory);
     }
@@ -196,7 +208,7 @@ class Extension extends TwigExtension
     /**
      * Returns a layout block contents (or null if it doesn't exist) and removes the block.
      */
-    public function displayBlock(string $name, ?string $default = null): ?string
+    public function displayBlock(string $name, string $default = null): ?string
     {
         if (($result = Block::placeholder($name)) === null) {
             return $default;
@@ -229,5 +241,78 @@ class Extension extends TwigExtension
     public function endBlock($append = true): void
     {
         Block::endBlock($append);
+    }
+
+    /**
+     * Temporary my_wintercms integration layer:
+     * keep the public `page` filter compatible with Hippo.Core multisite
+     * while falling back to core CMS behavior when the helper is absent.
+     */
+    public function multiSitePageFilter($name, $parameters = [], $routePersistence = true): ?string
+    {
+        return $this->rewriteUrlForMultisite(
+            $this->controller->pageUrl($name, $parameters, $routePersistence)
+        );
+    }
+
+    /**
+     * Temporary my_wintercms integration layer:
+     * keep the public `theme` filter compatible with Hippo.Core multisite
+     * while falling back to core CMS behavior when the helper is absent.
+     */
+    public function multiSiteThemeFilter($url): string
+    {
+        return $this->rewriteUrlForMultisite(
+            $this->controller->themeUrl($url)
+        ) ?? '';
+    }
+
+    /**
+     * Rewrites a generated URL through Hippo.Core when available.
+     */
+    protected function rewriteUrlForMultisite(?string $url): ?string
+    {
+        if ($url === null || !$this->hasMultiSiteUrlRewriter()) {
+            return $url;
+        }
+
+        return $this->replaceHostInUrl($url);
+    }
+
+    /**
+     * Rewrites rendered HTML asset URLs through Hippo.Core when available.
+     */
+    protected function rewriteRenderedAssetUrls(string $html): string
+    {
+        if (!$this->hasMultiSiteUrlRewriter()) {
+            return $html;
+        }
+
+        return preg_replace_callback(
+            '/\b(?:src|href)="([^"]+)"/i',
+            function ($matches) {
+                $fullUrl = $matches[1];
+                $newUrl = $this->replaceHostInUrl($fullUrl);
+
+                return str_replace($fullUrl, $newUrl, $matches[0]);
+            },
+            $html
+        ) ?? $html;
+    }
+
+    /**
+     * Returns true when the temporary Hippo.Core multisite helper is available.
+     */
+    protected function hasMultiSiteUrlRewriter(): bool
+    {
+        return class_exists(\Hippo\Core\Classes\MultiSiteHelper::class);
+    }
+
+    /**
+     * Rewrites a single URL through Hippo.Core.
+     */
+    protected function replaceHostInUrl(string $url): string
+    {
+        return \Hippo\Core\Classes\MultiSiteHelper::replaceHostInUrl($url);
     }
 }

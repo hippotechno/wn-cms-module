@@ -83,7 +83,7 @@ class Page extends CmsCompoundObject
 
         $layouts = Layout::listInTheme($theme, true);
         $result = [];
-        $result[''] = Lang::get('cms::lang.page.no_layout');
+        $result[null] = Lang::get('cms::lang.page.no_layout');
 
         foreach ($layouts as $layout) {
             $baseName = $layout->getBaseFileName();
